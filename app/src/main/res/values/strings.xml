@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">App Blocker</string>
+    <string name="accessibility_service_description">This service blocks APK installations from unknown sources to protect your device.</string>
+</resources>
