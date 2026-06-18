@@ -5,4 +5,4 @@
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_service_description"
-    android:packageNames="com.google.android.packageinstaller,com.android.packageinstaller" />
+    android:packageNames="com.google.android.packageinstaller,com.android.packageinstaller,com.miui.packageinstaller,com.oplus.packageinstaller,com.samsung.android.packageinstaller" />

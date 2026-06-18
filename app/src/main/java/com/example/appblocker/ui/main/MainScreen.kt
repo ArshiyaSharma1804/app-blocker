@@ -1,8 +1,11 @@
 package com.example.appblocker.ui.main
 
 import android.content.Intent
+import android.net.Uri
+import android.os.Environment
 import android.provider.Settings
-import androidx.compose.foundation.background
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,20 +14,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.appblocker.data.AppInfo
+import com.example.appblocker.data.AppSource
 import com.example.appblocker.data.DefaultDataRepository
+import com.example.appblocker.data.InstallLogManager
 import com.example.appblocker.theme.AppBlockerTheme
 
 import android.content.ComponentName
 import android.text.TextUtils
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -49,6 +51,8 @@ fun isAccessibilityServiceEnabled(context: android.content.Context): Boolean {
     return false
 }
 
+enum class ActiveScreen { MAIN, APK_LIST, WHITELIST }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -57,7 +61,29 @@ fun MainScreen(
   val context = LocalContext.current
   val viewModel: MainScreenViewModel = viewModel { MainScreenViewModel(DefaultDataRepository(context)) }
   val state by viewModel.uiState.collectAsStateWithLifecycle()
-  var isDarkTheme by remember { mutableStateOf(false) }
+
+  var activeScreen by remember { mutableStateOf(ActiveScreen.MAIN) }
+
+  val permissionLauncher = rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.StartActivityForResult()
+  ) {
+      if (Environment.isExternalStorageManager()) {
+          activeScreen = ActiveScreen.APK_LIST
+      }
+  }
+
+  // Sub-screens
+  when (activeScreen) {
+      ActiveScreen.APK_LIST -> {
+          ApkListScreen { activeScreen = ActiveScreen.MAIN }
+          return
+      }
+      ActiveScreen.WHITELIST -> {
+          WhitelistScreen { activeScreen = ActiveScreen.MAIN }
+          return
+      }
+      ActiveScreen.MAIN -> { /* fall through to main UI below */ }
+  }
 
   val lifecycleOwner = LocalLifecycleOwner.current
   var isServiceEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
@@ -74,7 +100,7 @@ fun MainScreen(
       }
   }
 
-  AppBlockerTheme(darkTheme = isDarkTheme) {
+  AppBlockerTheme(darkTheme = false) {
       Surface(
           modifier = modifier.fillMaxSize(),
           color = MaterialTheme.colorScheme.background
@@ -84,12 +110,23 @@ fun MainScreen(
                   TopAppBar(
                       title = { Text("App Blocker") },
                       actions = {
-                          Row(verticalAlignment = Alignment.CenterVertically) {
-                              Text("Dark Mode", modifier = Modifier.padding(end = 8.dp))
-                              Switch(
-                                  checked = isDarkTheme,
-                                  onCheckedChange = { isDarkTheme = it }
-                              )
+                          // APK button — scan device for .apk files
+                          TextButton(onClick = {
+                              if (Environment.isExternalStorageManager()) {
+                                  activeScreen = ActiveScreen.APK_LIST
+                              } else {
+                                  val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                                  intent.data = Uri.parse("package:${context.packageName}")
+                                  permissionLauncher.launch(intent)
+                              }
+                          }) {
+                              Text("APK")
+                          }
+                          // WTL button — view whitelisted APKs
+                          TextButton(onClick = {
+                              activeScreen = ActiveScreen.WHITELIST
+                          }) {
+                              Text("WTL")
                           }
                       },
                       colors = TopAppBarDefaults.topAppBarColors(
@@ -158,10 +195,10 @@ fun MainScreen(
 @Composable
 fun AppListTabs(data: List<AppInfo>) {
     var selectedTabIndex by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Play Store Apps", "Unknown Sources")
+    val tabs = listOf("All Apps", "Play Store", "System", "Unknown Sources")
 
     Column {
-        TabRow(selectedTabIndex = selectedTabIndex) {
+        ScrollableTabRow(selectedTabIndex = selectedTabIndex) {
             tabs.forEachIndexed { index, title ->
                 Tab(
                     selected = selectedTabIndex == index,
@@ -171,10 +208,12 @@ fun AppListTabs(data: List<AppInfo>) {
             }
         }
 
-        val filteredData = if (selectedTabIndex == 0) {
-            data.filter { it.isPlayStore }
-        } else {
-            data.filter { !it.isPlayStore }
+        val filteredData = when (selectedTabIndex) {
+            0 -> data                                           // All Apps
+            1 -> data.filter { it.source == AppSource.PLAY_STORE }  // Play Store
+            2 -> data.filter { it.source == AppSource.SYSTEM }      // System
+            3 -> data.filter { it.source == AppSource.UNKNOWN }     // Unknown Sources
+            else -> data
         }
 
         LazyColumn(
@@ -192,7 +231,7 @@ fun AppListTabs(data: List<AppInfo>) {
                 }
             } else {
                 items(filteredData) { appInfo ->
-                    AppItemRow(appInfo)
+                    AppItemRow(appInfo, showBlockedCount = selectedTabIndex == 3)
                 }
             }
         }
@@ -200,7 +239,9 @@ fun AppListTabs(data: List<AppInfo>) {
 }
 
 @Composable
-fun AppItemRow(appInfo: AppInfo) {
+fun AppItemRow(appInfo: AppInfo, showBlockedCount: Boolean = false) {
+    val context = LocalContext.current
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -221,11 +262,36 @@ fun AppItemRow(appInfo: AppInfo) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(4.dp))
+
+            val sourceLabel = when (appInfo.source) {
+                AppSource.PLAY_STORE -> "Source: Google Play Store"
+                AppSource.SYSTEM -> "Source: System / Pre-installed"
+                AppSource.UNKNOWN -> "Source: Unknown / Sideloaded"
+            }
+            val sourceColor = when (appInfo.source) {
+                AppSource.PLAY_STORE -> MaterialTheme.colorScheme.primary
+                AppSource.SYSTEM -> MaterialTheme.colorScheme.tertiary
+                AppSource.UNKNOWN -> MaterialTheme.colorScheme.error
+            }
             Text(
-                text = if (appInfo.isPlayStore) "Source: Google Play Store" else "Source: Unknown / Sideloaded",
+                text = sourceLabel,
                 style = MaterialTheme.typography.labelMedium,
-                color = if (appInfo.isPlayStore) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                color = sourceColor
             )
+
+            // Show blocked attempt count on the Unknown Sources tab
+            if (showBlockedCount) {
+                val blockedCount = InstallLogManager.getBlockedCount(context, appInfo.name)
+                if (blockedCount > 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Blocked $blockedCount time${if (blockedCount != 1) "s" else ""}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
     }
 }
